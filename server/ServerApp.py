@@ -191,30 +191,6 @@ class ConDBHandler(WPHandler):
         if buf:
             yield ''.join(buf)
 
-    def parseConditions(self, args):
-        lst = args.get("where", "")
-        if not lst: return []
-        if type(lst) != type([]):
-            lst = [lst]
-        parse_re = re.compile("(?P<name>\w*?)(?P<sign>(\<=|\<|=|\>=|\>|\!=))(?P<value>-?\d+(\.\d+)?)")
-        conditions = []
-        for item in lst:
-            words = item.split(',')
-            for w in words:
-                #print "word: <%s>" % (w,)
-                m = parse_re.match(w)
-                if m:
-                    name = m.group("name")
-                    value = m.group("value")
-                    sign = m.group("sign")
-                    try:    value = int(value)
-                    except:
-                        try:    value = float(value)
-                        except: pass
-                    conditions.append((name, sign, value))
-        #print "parseConditions:", conditions
-        return conditions
-
     def sortTuples(self, data, sort_spec):
         # sorts data in place !
         # sort_spec: col1,col2
@@ -234,164 +210,17 @@ class ConDBHandler(WPHandler):
             data.sort(lambda x, y:  cmp(x[1], y[1]) or cmp(x[0], y[0]))
         return data        
 
-    def filterAndSort(self, table, data, conditions, sort, channel_ranges):
-        # data is [(channel, tv, (data,...)),...]
-        # conditions is [(column name, op, value),...]
-
-        if not (conditions or sort or channel_ranges):
-            return data
-        
-        columns = table.columns()
-        coldict = { "channel":1,    "tv":2  }
-        for i, c in enumerate(columns):
-            coldict[c] = i+3        # reserve index 1 for channel and 2 for tv
-
-        if conditions:
-            if type(data) != type([]):  data = list(data)
-            # translate conditions
-                
-            conds = []
-            for c, op, value in conditions:
-                conds.append((coldict[c], op, value))            
-            
-            data.sort(lambda x,y: cmp(x[0], y[0]) or cmp(x[1], y[1]))    # sort by channel then tv
-            filtered = []
-            for i, (channel, tv, values) in enumerate(data):
-                next_tv = None
-                if i < len(data)-1 and data[i+1][0] == channel:   next_tv = data[i+1][1]
-                for ci, op, fv in conds:
-                    if ci == 1:     v = channel
-                    elif ci == 2:   v = tv
-                    else:
-                        v = values[ci-3]
-                    ok = True
-                    if op == '=':   ok = v == fv
-                    elif op == '<': ok = v < fv
-                    elif op == '<=': ok = v <= fv
-                    elif op == '>': ok = v > fv
-                    elif op == '>=': ok = v >= fv
-                    elif op == '!=': ok = v != fv
-                    
-                    if ok:  filtered.append((channel, tv, values))      #, next_tv))
-            data = filtered
-
-        if channel_ranges and channel_ranges != [(None, None)]:
-            out = []
+    def filter_channels(self, data, channel_ranges):
+        if not channel_ranges or channel_ranges == [(None, None)]:
+            yield from data
+        else:
             for channel, tv, values in data:
                 for c0, c1 in channel_ranges:
                     if (c0 is None or channel >= c0) and (c1 is None or channel <= c1):
-                        out.append((channel, tv, values))
-                        break
-            data = out
-        
-        if sort:
-            if not isinstance(data, list):  data = list(data)
-            sort_columns = sort.split(",")
-            
-            class sort_function:
-                def __init__(self, indexes):
-                    self.Indexes = indexes
-                    
-                def __call__(self, x, y):
-                    ret = 0
-                    for i in self.Indexes:
-                        if i == 1:  ret = cmp(x[0], y[0])
-                        elif i == 2:  ret = cmp(x[1], y[1])
-                        else:       ret = cmp(x[2][i-3], y[2][i-3])
-                        if ret: break
-                    return ret
-                    
-            indexes = [coldict[c] for c in sort_columns]
-            
-            #print "indexes=", indexes
-            
-            data.sort(sort_function(indexes))
-            
-        return data
-            
-    def getData(self, table, t=None, t0=None, t1=None, 
-                    cr=None, 
-                    channels=None,
-                    rtime = None,
-                    iter="no",
-                    sort=None,
-                    tag = None, **args):
-        
-        
-        #print "getData(%s,%s,%s,%s,%s)" % (table, t, t0, t1, args)
-        
-        if rtime and tag:
-            raise ValueError("Can not specify both rtime and tag")
+                        yield (channel, tv, values)
 
-        conditions = self.parseConditions(args)
-
-        data_type = args.get('type') or None
-        if data_type:   data_type = str(data_type)
-
-        if channels is None:    channels = cr
-        
-        channel_ranges = []
-        cmin, cmax = None, None
-        
-        if channels:
-            for segment in channels.split(","):
-                c01 = segment.split("-", 1)
-                if len(c01) < 2:
-                    c01 = [c01[0], c01[0]]
-                c0, c1 = c01
-                c0 = c0 or None                 # convert blanks to None
-                c1 = c1 or None
-                try:    c0 = int(c0)
-                except: pass                    # either None or string
-                try:    c1 = int(c1)
-                except: pass                    # either None or string
-                if (c0, c1) != (None, None):
-                    channel_ranges.append((c0, c1))
-                    if cmin is None:    cmin = c0
-                    if cmax is None:    cmax = c1
-                    if c0 is not None:  cmin = min(cmin, c0)
-                    if c1 is not None:  cmax = max(cmax, c1)
-
-        channel_ranges = channel_ranges or None
-        global_range = (cmin, cmax) if (cmin or cmax) else None
-
-        if t != None:
-            lines = self.getAtTime(table, t, data_type=data_type, tag = tag,
-                            rtime=rtime, channel_range = global_range,
-                            conditions = conditions)
-        else:
-            #print "calling getInterval..."
-            #print sort
-            if iter == "yes" and not sort:
-                lines = self.getIntervalIter(table, t0, t1, data_type=data_type, 
-                                tag = tag,
-                                rtime=rtime, channel_range = global_range,
-                                conditions = conditions)
-            else:
-                lines = self.getInterval(table, t0, t1, data_type=data_type, 
-                                tag = tag,
-                                rtime=rtime, channel_range = global_range,
-                                conditions = conditions, sort = sort)
-
-        #lines = list(lines)
-        #print "getData: len(lines)=%d" % (len(lines),)
-
-        #print "channel ranges:", channel_ranges
-
-        lines = self.filterAndSort(table, lines, conditions, sort, channel_ranges)
-
-        return lines
-
-    #def get(self, req, relpath, table=None, cache="yes", t=None, t0=None, t1=None, 
-    #                cr=None, 
-    #                rtime = None,
-    #                columns=None, iter="no",
-    #                sort=None,
-    #                tag = None, **args):
-    
     def get(self, req, relpath, table=None, columns=None, **args):
         #print "get(%s,%s,%s)" % (table, t0, t1)
-
 
         columns = columns.split(',')
         table_name = table
@@ -423,8 +252,7 @@ class ConDBHandler(WPHandler):
         return resp
 
     def getAtTime(self, table, t, tag=None, rtime=None, data_type=None, 
-                    conditions = [],
-                    channel_range = None, **args):
+                    channel_range = None):
         # returns iterator [(channel, tv, (data,...)),...]
         t = text2datetime(t)
         if not tag and rtime:    
@@ -436,20 +264,66 @@ class ConDBHandler(WPHandler):
                     channel_range = channel_range, conditions = conditions)
         return ((tup[0], tup[1], tup[2:]) for tup in data)
 
-    def getIntervalIter(self, table, t0, t1, tag=None, rtime=None, data_type=None, 
-                        channel_range = None, conditions = [], **args):
+    def getInterval(self, table, t0, t1, tag=None, rtime=None, data_type=None, 
+                        channel_range = None):
         t0 = text2datetime(t0)
         t1 = text2datetime(t1)
         if not tag and rtime:    rtime = text2datetime(rtime)
-        data = table.getDataIntervalIter(t0, t1, tag=tag, tr=rtime, data_type=data_type,
-                        channel_range = channel_range, conditions = conditions)
+        data = table.getDataInterval(t0, t1, tag=tag, tr=rtime, data_type=data_type,
+                        channel_range = channel_range)
         return data
         
-    def getInterval(self, table, t0, t1, sort=None, **args):
-        out = list(self.getIntervalIter(table, t0, t1, **args))
-        if sort:
-            out = self.sortTuples(out, sort)
-        return out
+    def getData(self, table, t=None, t0=None, t1=None, 
+                    cr=None, 
+                    channels=None,
+                    rtime = None,
+                    iter="no",
+                    tag = None, data_type=None):
+        
+        #print "getData(%s,%s,%s,%s,%s)" % (table, t, t0, t1, args)
+        
+        if rtime and tag:
+            raise ValueError("Can not specify both rtime and tag")
+
+        if channels is None:    channels = cr
+        
+        channel_ranges = []
+        cmin, cmax = None, None
+        
+        if channels:
+            for segment in channels.split(","):
+                c01 = segment.split("-", 1)
+                if len(c01) < 2:
+                    c01 = [c01[0], c01[0]]
+                c0, c1 = c01
+                c0 = c0 or None                 # convert blanks to None
+                c1 = c1 or None
+                try:    c0 = int(c0)
+                except: pass                    # either None or string
+                try:    c1 = int(c1)
+                except: pass                    # either None or string
+                if (c0, c1) != (None, None):
+                    channel_ranges.append((c0, c1))
+                    if cmin is None:    cmin = c0
+                    if cmax is None:    cmax = c1
+                    if c0 is not None:  cmin = min(cmin, c0)
+                    if c1 is not None:  cmax = max(cmax, c1)
+
+        channel_ranges = channel_ranges or None
+        global_range = (cmin, cmax) if (cmin or cmax) else None
+
+        if t != None:
+            lines = self.getAtTime(table, t, data_type=data_type, tag = tag,
+                            rtime=rtime, channel_range = global_range)
+        else:
+            lines = self.getInterval(table, t0, t1, data_type=data_type, 
+                            tag = tag,
+                            rtime=rtime, channel_range = global_range)
+
+        if channel_ranges:
+            lines = self.filter_channels(data, channel_ranges)
+
+        return lines
 
     def parseTuple(self, line):
         out = []
@@ -559,10 +433,6 @@ class ConDBHandler(WPHandler):
         for i in range(1, len(input)):
             line = input[i].strip()
             if not line:    continue
-            #print("line:", line)
-            if line.startswith('tolerance,,'):
-                tolerances = self.parseTuple(line[len('tolerance,,'):])
-                continue
 
             tup = self.parseTuple(line)
             channelid = tup[0]
