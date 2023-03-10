@@ -14,7 +14,8 @@
 import sys, os
 # sys.path.insert(0, os.path.abspath('.'))
 
-sys.path.insert(0, os.path.abspath('../ucondb'))
+sys.path.insert(0, os.path.abspath('..'))
+#print(sys.path)
 import condb
 
 # -- Project information -----------------------------------------------------
