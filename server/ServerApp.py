@@ -1,27 +1,12 @@
-from webpie import WPApp, WPHandler, Response
-from wsdbtools import ConnectionPool
-from configparser import ConfigParser
-from ConDB import ConDB
-import time, sys, hashlib, os, random, traceback
+from webpie import WPApp, WPHandler, Response, sanitize
+from wsdbtools import ConnectionPool, DbDig
+from condb import ConDB, signature, __version__ as condb_version
+import time, sys, hashlib, os, random, traceback, yaml, json
 from datetime import datetime, timedelta, tzinfo
-from timelib import text2datetime, epoch
+from timelib import text2timestamp, epoch
 from threading import RLock, Lock, Condition
 import threading, re
-from trace import Tracer
-
-from py3 import to_bytes, to_str
-from signature import signature
-
-from GUI_Version import GUI_Version
-from API_Version import API_Version
-from DataBrowser import DataBrowser
-
-class   ConfigFile(ConfigParser):
-    def __init__(self, path=None, envVar=None):
-        ConfigParser.__init__(self)
-        path = path or os.environ.get(envVar)
-        if path:
-            self.read(path)
+from rfc2617 import digest_server
 
 def dtfmt(x, fmt):
     return x.strftime(fmt) if x else ''
@@ -47,53 +32,35 @@ def nones_to_nulls(x):
     else:   return x
 
            
-class ConDBServerApp(WPApp):
+class ServerApp(WPApp):
 
-    def __init__(self, rootclass, config_file=None):
+    def __init__(self, rootclass, config):
         WPApp.__init__(self, rootclass)
-        self.Config = cfg = ConfigFile(path=config_file, envVar = 'CON_DB_CFG')
-        self.ServerPassword = self.Config.get('Server','password')
-        try:    self.Title = self.Config.get('GUI','title')
-        except: self.Title = "Conditions Database"
-        try:
-            self.CacheTTL = int(self.Config.get('Server', 'CacheTTL'))
-        except:
-            self.CacheTTL = 3600   # 1 hour
-        try:
-            self.TaggedCacheTTL = int(self.Config.get('Server', 'TaggedCacheTTL'))
-        except:
-            self.TaggedCacheTTL = 3600*24*7   # 7 days
+        self.Config = config
+        server_cfg = self.Config.get('Server', {})
+        gui_cfg = self.Config.get('GUI', {})
+        self.ServerPassword = server_cfg.get('password')
+        self.Title = gui_cfg.get('title', "Conditions Database")
+        self.CacheTTL = int(server_cfg.get('cache_ttl', 3600))
+        self.TaggedCacheTTL = int(server_cfg.get('tagged_cache_ttl', 3600*24*7))
+
+        self.PutPasswords = server_cfg.get("passwords", {})     # {folder: {user:password}}
        
         #
         # Init DB connection pool 
         #
-        self.Host = None
-        self.DBName = cfg.get('Database','name')
-        self.User = cfg.get('Database','user')
-        self.Password = cfg.get('Database','password')
+        db_cfg = self.Config.get('Database', {})
+        self.DBName = db_cfg['name']
+        self.User = db_cfg['user']
+        self.Host = db_cfg["host"]
+        self.Port = int(db_cfg["port"])
+        self.Password = db_cfg.get('password')
+            
+        self.Namespace = db_cfg.get("namespace", 'public')
+            
+        connstr = "dbname=%s user=%s password=%s host=%s port=%s" % \
+            (self.DBName, self.User, self.Password, self.Host, self.Port)
 
-        self.Port = None
-        try:    
-            self.Port = int(cfg.get('Database','port'))
-        except:
-            pass
-            
-        self.Host = None
-        try:    
-            self.Host = cfg.get('Database','host')
-        except:
-            pass
-            
-        self.Namespace = 'public'
-        try:    
-            self.Namespace = cfg.get('Database','namespace')
-        except:
-            pass
-            
-        connstr = "dbname=%s user=%s password=%s" % \
-            (self.DBName, self.User, self.Password)
-        if self.Port:   connstr += " port=%s" % (self.Port,)
-        if self.Host:   connstr += " host=%s" % (self.Host,)
         self.ConnPool = ConnectionPool(postgres=connstr, idle_timeout=5)
         
         self.initJinjaEnvironment(
@@ -106,22 +73,25 @@ class ConDBServerApp(WPApp):
                 "as_json":    as_json
             },
             globals = 
-            {    "GLOBAL_Title":     self.Title,
-                 "GLOBAL_GUI_Version":   GUI_Version, 
-                 "GLOBAL_API_Version":   API_Version  
+            {    "GLOBAL_Title":         self.Title,
+                 "GLOBAL_GUI_Version":   None, 
+                 "GLOBAL_API_Version":   condb_version  
             }
         )
-            
+        
+    def getPassword(self, folder, user):
+        return self.PutPasswords.get(folder, {}).get(user) or self.PutPasswords.get("*", {}).get(user)
+
     def db(self):
         conn = self.ConnPool.connect()
         #print("App.db(): connection:", id(conn), conn)
         return ConDB(connection = conn)
-        
 
-class ConDBHandler(WPHandler):
+
+class Handler(WPHandler):
     def __init__(self, req, app):
         WPHandler.__init__(self, req, app)
-        self.B = DataBrowser(req, app)
+        #self.B = DataBrowser(req, app)
         
     def probe(self, req, relpath, **args):
         try:    
@@ -154,29 +124,38 @@ class ConDBHandler(WPHandler):
             text_values.append(v)
         return ','.join(text_values)
         
-    def csv_iterator_from_iter(self, table, data):
-        columns = table.Columns
-        first_line = True
-        extra_tv = False
+    def csv_iterator_from_iter(self, data, data_columns, include_tr=False, include_data_type=False):
+        headline = "channel,tv,"
+        if include_tr:  headline += "tr,"
+        if include_data_type:  headline += "data_type,"
+        
+        yield headline+','.join(data_columns)+'\n'
         for tup in data:
-            if first_line:
-                extra_tv = len(tup) == 4
-                if extra_tv:
-                    yield 'channel,tv,tv_end,'+','.join(columns)+'\n'
-                else:
-                    yield 'channel,tv,'+','.join(columns)+'\n'
-                first_line = False
+            if not include_data_type:   tup = tup[:3] + tup[4:]
+            if not include_tr:          tup = tup[:2] + tup[3:]
+            vtxt = self.dataTupleToCSV(tup)
+            yield vtxt + "\n"
+            
+    def json_iterator_from_iter(self, data, data_columns, include_tr=False, include_data_type=False):
+        yield "[\n"
+        first_line = True
+        for tup in data:
+            out = '  '
+            if not first_line:
+                out = ',\n  '
+            row = {
+                "channel": tup[0],
+                "tv": tup[1]
+            }
+            if include_tr:  row["tr"] = tup[2]
+            if include_data_type:  row["data_type"] = tup[3]
+            for column_name, value in zip(data_columns, tup[4:]):
+                row[column_name] = value
+            out += json.dumps(row)
+            yield out
+            first_line = False
+        yield "\n]\n"
 
-            c, tv, values = tup[0], tup[1], tup[2]
-            vtxt = self.dataTupleToCSV(values)
-            if extra_tv:
-                tv_end = tup[3]
-                tv_end = '%.3f' % (epoch(tv_end),) if tv_end != None else ''
-                yield '%d,%.3f,%s,%s\n' % (c, epoch(tv), tv_end, vtxt)
-            else:
-                yield '%d,%.3f,%s\n' % (c, epoch(tv), vtxt)
-                
-    
     def mergeLines(self, iter, maxlen=10000):
         buf = []
         total = 0
@@ -190,6 +169,11 @@ class ConDBHandler(WPHandler):
             total += n
         if buf:
             yield ''.join(buf)
+
+    def data_output_generator(self, data, data_columns, include_tr=False, include_data_type=False, format="csv"):
+        formatted = self.csv_iterator_from_iter(data, data_columns, include_tr=include_tr, include_data_type=include_data_type) if format == "csv" \
+                else self.json_iterator_from_iter(data, data_columns, include_tr=include_tr, include_data_type=include_data_type)
+        return self.mergeLines(formatted)
 
     def sortTuples(self, data, sort_spec):
         # sorts data in place !
@@ -214,36 +198,47 @@ class ConDBHandler(WPHandler):
         if not channel_ranges or channel_ranges == [(None, None)]:
             yield from data
         else:
-            for channel, tv, values in data:
+            for tup in data:
+                channel = tup[0]
                 for c0, c1 in channel_ranges:
                     if (c0 is None or channel >= c0) and (c1 is None or channel <= c1):
-                        yield (channel, tv, values)
+                        yield tup
 
-    def get(self, req, relpath, table=None, columns=None, **args):
-        #print "get(%s,%s,%s)" % (table, t0, t1)
-
-        columns = columns.split(',')
-        table_name = table
-        table = self.App.db().table(table, columns)
-        if not table.exists():
-            return Response("Table %s does not exist" % (table_name,), status=404)
-            
+    @sanitize()
+    def get(self, req, relpath, folder=None, t=None, t0=None, t1=None, include_tr="no", include_data_type=None,
+                tr=None, format="csv", data_type=None, **args):
+        #print "get(%s,%s,%s)" % (folder, t0, t1)
         
-        lines = self.getData(table, **args)
-                    
+        if t0 is not None:  t0 = float(t0)
+        if t1 is not None:  t1 = float(t1)
+
+        if t is not None:  
+            t0 = t1 = float(t)
+            
+        if tr is not None:
+            tr = text2timestamp(tr)
+
+        include_tr = include_tr == "yes"
+        include_data_type = include_data_type == "yes" or (data_type is None and include_data_type != "no")
+        
+        folder_name = folder
+        folder = self.App.db().openFolder(folder)
+        if folder is None:
+            return Response("Table %s does not exist" % (folder_name,), status=404)
+
+        lines = self.getData(folder, t0, t1, tr=tr, data_type=data_type, **args)
+
         if lines == None:
             lines = []
 
-        #lines = list(lines)
-        #print "get: len(lines)=%d" % (len(lines),)
+        lines = list(lines)
+        #print("get: lines:")
+        #for l in lines:
+        #    print(l)
 
-        lines = self.csv_iterator_from_iter(table, lines)
-
-        #resp = Response(content_type='text/plain', 
-        #    app_iter = self.mergeLines(lines))
-        out = ''.join(lines)
-        #print "get: output length=", len(out)
-        resp = Response(out, content_type='text/plain')
+        lines = self.data_output_generator(lines, folder.DataColumns, include_tr=include_tr, include_data_type=include_data_type,
+                    format = format)
+        resp = Response(app_iter = lines, content_type=f'text/{format}')
         cache_ttl = self.App.CacheTTL
         if "tag" in args:
             cache_ttl = self.App.TaggedCacheTTL
@@ -251,42 +246,16 @@ class ConDBHandler(WPHandler):
         resp.cache_expires(cache_ttl)
         return resp
 
-    def getAtTime(self, table, t, tag=None, rtime=None, data_type=None, 
-                    channel_range = None):
-        # returns iterator [(channel, tv, (data,...)),...]
-        t = text2datetime(t)
-        if not tag and rtime:    
-            rtime = text2datetime(rtime)
-        else:
-            rtime =  None
-        
-        data = table.getDataIter(t, tag=tag, tr=rtime, data_type=data_type,
-                    channel_range = channel_range, conditions = conditions)
-        return ((tup[0], tup[1], tup[2:]) for tup in data)
-
-    def getInterval(self, table, t0, t1, tag=None, rtime=None, data_type=None, 
-                        channel_range = None):
-        t0 = text2datetime(t0)
-        t1 = text2datetime(t1)
-        if not tag and rtime:    rtime = text2datetime(rtime)
-        data = table.getDataInterval(t0, t1, tag=tag, tr=rtime, data_type=data_type,
-                        channel_range = channel_range)
-        return data
-        
-    def getData(self, table, t=None, t0=None, t1=None, 
-                    cr=None, 
+    def getData(self, folder, t0, t1, 
+                    tr = None,
                     channels=None,
-                    rtime = None,
-                    iter="no",
                     tag = None, data_type=None):
         
-        #print "getData(%s,%s,%s,%s,%s)" % (table, t, t0, t1, args)
+        #print "getData(%s,%s,%s,%s,%s)" % (folder, t, t0, t1, args)
         
-        if rtime and tag:
+        if tr and tag:
             raise ValueError("Can not specify both rtime and tag")
 
-        if channels is None:    channels = cr
-        
         channel_ranges = []
         cmin, cmax = None, None
         
@@ -312,20 +281,16 @@ class ConDBHandler(WPHandler):
         channel_ranges = channel_ranges or None
         global_range = (cmin, cmax) if (cmin or cmax) else None
 
-        if t != None:
-            lines = self.getAtTime(table, t, data_type=data_type, tag = tag,
-                            rtime=rtime, channel_range = global_range)
-        else:
-            lines = self.getInterval(table, t0, t1, data_type=data_type, 
-                            tag = tag,
-                            rtime=rtime, channel_range = global_range)
+        rows = folder.getData(t0, t1, data_type=data_type, tag = tag, tr=tr, channel_range = global_range)
 
         if channel_ranges:
-            lines = self.filter_channels(data, channel_ranges)
+            rows = self.filter_channels(rows, channel_ranges)
 
-        return lines
+        return rows
 
     def parseTuple(self, line):
+        if isinstance(line, bytes):
+            line = line.decode("utf-8")
         out = []
         while line:
             line = line.strip()
@@ -390,170 +355,143 @@ class ConDBHandler(WPHandler):
                 
         return tuple(out)   
 
-
     def authenticateSignature(self, req, data):
         salt = req.headers['X-Salt']
         sig = req.headers['X-Signature']
-        table = req.GET['table']
-        digest = signature(self.App.ServerPassword, salt, req.query_string, data)
+        folder = req.GET['folder']
+        digest = signature(self.App.ServerPassword, salt, req.query_string, b"")
         return digest == sig
         
-    def put(self, req, relpath, table=None, **args):
+    def authenticate_digest(self, req, folder):
+        ok, header = digest_server(folder, req.environ, self.App.getPassword)
+        if not ok:
+            resp = Response("Authorization required", status=401)
+            if header:
+                resp.headers['WWW-Authenticate'] = header
+            return False, resp
+        return True, None
+
+    @sanitize()
+    def put(self, req, relpath, folder=None, tr=None, data_types=None, **args):        
+        folder_name = folder
+        if not folder_name:
+            return 400, "Folder mush be specified"
+            
+        if tr is not None:
+            tr = timelib.text2timestamp(tr)
+        
+        if not data_types:
+            data_types = [""]
+        else:
+            data_types = data_types.split(",")
+
         if req.method != 'POST':
-            resp = Response()
-            resp.status = 400
-            return resp
+            return 400
 
         if "X-Signature" in req.headers:
             check = self.authenticateSignature(req, req.body)
             if not check:
-                resp = Response("Signature forged")
-                resp.status = 400
-                return resp
+                return 403, "Authentication failed"
         else:
-            resp = Response("Authentication required")
-            resp.status = 400
-            return resp
-        
-        input = to_str(req.body).split("\n")
-        tolerances = None
-        header = input[0].strip()
+            ok, resp = self.authenticate_digest(req, folder)
+            if not ok:  return resp         # authentication failrure
+
+        input = req.body.split(b"\n")
+        header = input[0].decode("utf-8").strip()
         columns = [x.strip() for x in header.split(',')]
         if len(columns) < 3 or \
                 columns[0].lower() != 'channel' or \
                 columns[1].lower() != 'tv':
-            resp = Response("Invalid header line in the CSV input.")
-            resp.status = 400
-            return resp
+            return 400, "Invalid header line in the CSV input."
                 
         columns = columns[2:]
         #print 'columns: ', columns
-        table = self.App.db().table(table, columns)
+        folder = self.App.db().openFolder(folder_name)
+        if folder is None:
+            return 404, "Folder not found"
+            
         data = []
         for i in range(1, len(input)):
             line = input[i].strip()
             if not line:    continue
 
             tup = self.parseTuple(line)
-            channelid = tup[0]
-            tv = text2datetime(tup[1])
-            #print tv
-            values = tup[2:]
-            #print "data: ", channelid, tv, values
-            data.append((channelid, tv, values))
+            if len(tup) < 3 or not isinstance(tup[0], int) or not isinstance(tup[1], (int, float)):
+                return 400, f"Invalid data in line {i}"
+            data.append(tup)
             
         if not data:
             return Response("OK", status=204)
 
         #print "len(data)=", len(data)
 
-        types = []
-        for t in req.GET.getall('type'):
-            for x in t.split(','):
-                x = x.strip()
-                if not x in types:
-                    types.append(x)
-
-        #print "types=", types
-
-        if not types:
-            #print("data:")
-            #for line in data:
-            #    print(line)
-            table.addData(data, tolerances)
-        else:
-            for t in types:
-                table.addData(data, tolerances, data_type=t)
+        for t in data_types:
+            folder.addData(data, data_type=t, tr=tr, columns=columns)
         return Response("OK")
         
-    def patch(self, req, relpath, table=None, tend=None, **args):
-        if req.method != 'POST':
-            resp = Response()
-            resp.status = 400
-            return resp
+    @sanitize()
+    def tag(self, req, relpath, folder=None, tag=None, tr=None, copy_from=None, override='no', **args):
 
-
-        tend = text2datetime(tend)
-        input = req.body_file.readlines()
         if "X-Signature" in req.headers:
-            check = self.authenticateSignature(req, input)
+            check = self.authenticateSignature(req, req.body)
             if not check:
-                resp = Response("Signature forged")
-                resp.status = 400
-                return resp
+                return 403, "Authentication failed"
         else:
-            resp = Response("Authentication required")
-            resp.status = 400
-            return resp
-            
-        header = input[0].strip()
-        columns = [x.strip() for x in header.split(',')]
-        if len(columns) < 3 or \
-                columns[0].lower() != 'channel' or \
-                columns[1].lower() != 'tv':
-            resp = Response("Invalid header line in the CSV input.")
-            resp.status = 400
-            return resp
-                
-        columns = columns[2:]
-        #print 'columns: ', columns
-        table = self.App.db().table(table, columns)
-        data = []
-        for i in range(1, len(input)):
-            line = input[i].strip()
-            tup = self.parseTuple(line.split(','))
-            channelid = tup[0]
-            tv = text2datetime(tup[1])
-            #print tv
-            values = tup[2:]
-            #print "data: ", channelid, tv, values
-            data.append((channelid, tv, values))
+            ok, resp = self.authenticate_digest(req, folder)
+            if not ok:  return resp         # authentication failrure
 
-        #print "len(data)=", len(data)
-
-        types = []
-        for t in req.GET.getall('type'):
-            for x in t.split(','):
-                x = x.strip()
-                if not x in types:
-                    types.append(x)
-
-        #print "types=", types
-
-        if not types:
-            table.patch(data, tend)
-        else:
-            for t in types:
-                table.patch(data, tend, data_type=t)
-                
-        return Response("OK")
+        folder = self.App.db().openFolder(folder)
+        if folder is None:
+            return 404, "Folder not found"
         
-    
-    def tag(self, req, relpath, table=None, tag=None, 
-                copy_from=None, override='no', **args):     
-        table = self.App.db().table(table, [])
         if copy_from:
-            table.copyTag(copy_from, tag, override = override == 'yes')
+            folder.copyTag(copy_from, tag, override = override == 'yes')
         else:
-            table.tag(tag, override = override == 'yes')
+            tr = text2timestamp(tr)
+            folder.tag(tag, override = override == 'yes', tr=tr)
         return Response("OK")
-        
-    def snapshot(self, req, relpath, table=None, t=None, prefill=True, **args):
-        prefill = prefill != "no"
-        t = text2datetime(t)
-        table = self.App.db().table(table, [])
-        s = table.createSnapshot(t, prefill=prefill)
-        return Response("OK")
-        
+
+    @sanitize()
+    def tags(self, req, relpath, folder=None, format="csv"):
+        folder = self.App.db().openFolder(folder)
+        if folder is None:
+            return 404, "Folder not found"
+        tags = folder.tags()
+        if format == "csv":
+            out = ["name,tr"]
+            for tup in tags:
+                out.append(self.dataTupleToCSV(tup))
+            return "\n".join(out) + "\n", "text/csv"
+        else:
+            out = [{"tag":tag, "tr":tr} for tag, tr in tags]
+            return json.dumps(out), "text/json"
+
+    @sanitize()
+    def data_types(self, req, relpath, folder=None, format="csv"):
+        folder = self.App.db().openFolder(folder)
+        if folder is None:
+            return 404, "Folder not found"
+        types = folder.dataTypes()
+        if format == "csv":
+            out = ["name"]
+            for typ in types:
+                out.append(self.dataTupleToCSV((typ,)))
+            return "\n".join(out) + "\n", "text/csv"
+        else:
+            return json.dumps(list(types)), "text/json"
+
     def index(self, req, relpath, **args):
         return self.render_to_response("index.html")
         
 
-def create_application(config_file=None):
-    return ConDBServerApp(ConDBHandler, config_file)
+def create_application(config_file = None):
+    config_file = config_file or os.environ["CON_DB_CFG"]
+    config = yaml.load(open(config_file, "r"), Loader=yaml.SafeLoader)
+    return ServerApp(Handler, config)
     
+application = None
 if "CON_DB_CFG" in os.environ:
-    application = ConDBServerApp(ConDBHandler, os.environ["CON_DB_CFG"])
+    application = create_application()
 
 if __name__ == "__main__":
     import sys, getopt
@@ -563,10 +501,8 @@ if __name__ == "__main__":
     if config:
         print("Using config file:", config)
     print("Starting HTTP server at port 8888...") 
-    application = ConDBServerApp(ConDBHandler, config)
+    application = create_application(config)
     application.run_server(8888)
-        
-       
-        
+
 
 
