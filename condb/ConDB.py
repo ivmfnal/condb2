@@ -1,6 +1,6 @@
 import sys, time, datetime
 import io
-from wsdbtools import DbDig
+from .dbdig import DbDig
 
 #from dbdig import DbDig
 
