@@ -6,15 +6,11 @@
 ConDB Client Documentation
 ==========================
 
-Client installation
--------------------
-
-
-
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
+   client_installation
    api
    rest
 
