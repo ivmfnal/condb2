@@ -1,6 +1,5 @@
-import psycopg2, sys, time, datetime
+import sys, time, datetime
 import io
-from psycopg2.errors import UndefinedTable
 from wsdbtools import DbDig
 
 #from dbdig import DbDig
@@ -27,6 +26,7 @@ class ConDB:
         
     def connect(self):
         if self.Conn == None:
+            import psycopg2
             self.Conn = psycopg2.connect(self.ConnStr)
         return self.Conn
     
@@ -236,6 +236,8 @@ class CDFolder:
         return self.DB.copy_from(self.Name, data, table, columns)
 
     def exists(self):
+        from psycopg2.errors import UndefinedTable
+        
         try:    self.execute("select * from %t_update limit 1")
         except UndefinedTable:
             return False
@@ -285,6 +287,8 @@ class CDFolder:
         return True
         
     def createTables(self, owner = None, grants = {}, drop_existing=False):
+        from psycopg2.errors import UndefinedTable
+        
         exists = self.exists()
         c = self.DB.cursor()
         
