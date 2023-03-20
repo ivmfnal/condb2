@@ -18,5 +18,13 @@ Installation from github
     
         $ git clone https://github.com/ivmfnal/condb2
         $ cd condb2
-        $ python setup.py --user install
+        $ python setup.py install --user
+        
 
+Once the client is installed, ConDB library module will be available as ``condb``:
+
+    .. code-block:: python
+    
+        from condb import ConDB, ConDBClient
+        ...
+        
