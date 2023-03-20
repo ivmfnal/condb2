@@ -2,8 +2,8 @@ ConDB REST API
 ==============
 
 
-Getting data - <URL head>/get
------------------------------
+Getting data - <URL prefix>/get
+-------------------------------
 
 HTTP method: GET
 
@@ -22,8 +22,8 @@ Example:
 
         $ curl "http://host:8080/path/get?folder=my_schema.my_data&t=125436.0&format=json"
 
-Adding data - <URL head>/put
-----------------------------
+Adding data - <URL prefix>/put
+------------------------------
 
 HTTP method: POST
 Authentication required
@@ -65,8 +65,8 @@ To use with ``requests`` library:
         response = requests.post(url, data, auth=HTTPDigestAuth(username, password))
 
 
-Tagging database state - <URL head>/tag
----------------------------------------
+Tagging database state - <URL prefix>/tag
+-----------------------------------------
 
 HTTP method: POST
 Authentication required
@@ -81,8 +81,8 @@ Arguments
 
 The method requires ``digest authentication``, same as the ``put`` method.
 
-Listing existing tags - <URL head>/tags
----------------------------------------
+Listing existing tags - <URL prefix>/tags
+-----------------------------------------
 
 HTTP method: GET
 
@@ -92,8 +92,8 @@ Arguments
 * folder: text, required - folder name. If the folder is in non-default namespace (schema), the folder name is in the format: <namespace>.<folder name>.
 * format: text, optional - format of the output representation, ``csv`` or ``json``. Default: "csv"
 
-Listing existing data types - <URL head>/data_types
----------------------------------------------------
+Listing existing data types - <URL prefix>/data_types
+-----------------------------------------------------
 
 HTTP method: GET
 

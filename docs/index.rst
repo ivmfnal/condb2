@@ -7,12 +7,13 @@ ConDB Client Documentation
 ==========================
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Contents:
 
    client_installation
-   api
+   web_api
    rest
+   db_api
 
 Indices and tables
 ==================

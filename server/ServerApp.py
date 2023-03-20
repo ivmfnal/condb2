@@ -3,7 +3,7 @@ from wsdbtools import ConnectionPool, DbDig
 from condb import ConDB, signature, __version__ as condb_version
 import time, sys, hashlib, os, random, traceback, yaml, json
 from datetime import datetime, timedelta, tzinfo
-from timelib import text2timestamp, epoch
+from condb.timelib import text2timestamp, epoch
 from threading import RLock, Lock, Condition
 import threading, re
 from rfc2617 import digest_server
@@ -137,12 +137,13 @@ class Handler(WPHandler):
             yield vtxt + "\n"
             
     def json_iterator_from_iter(self, data, data_columns, include_tr=False, include_data_type=False):
-        yield "[\n"
+        columns = ["channel", "tv"]
+        if include_data_type:   columns.append("data_type")
+        if include_tr:          columns.append("tr")
+        yield '{\n  "columns":%s,\n  "rows":[' % (json.dumps(columns))
         first_line = True
         for tup in data:
-            out = '  '
-            if not first_line:
-                out = ',\n  '
+            out = '\n    ' if first_line else ',\n    ' 
             row = {
                 "channel": tup[0],
                 "tv": tup[1]
@@ -154,7 +155,7 @@ class Handler(WPHandler):
             out += json.dumps(row)
             yield out
             first_line = False
-        yield "\n]\n"
+        yield "\n  ]\n}\n"
 
     def mergeLines(self, iter, maxlen=10000):
         buf = []
@@ -237,7 +238,7 @@ class Handler(WPHandler):
         #    print(l)
 
         lines = self.data_output_generator(lines, folder.DataColumns, include_tr=include_tr, include_data_type=include_data_type,
-                    format = format)
+                    format=format)
         resp = Response(app_iter = lines, content_type=f'text/{format}')
         cache_ttl = self.App.CacheTTL
         if "tag" in args:
@@ -372,19 +373,14 @@ class Handler(WPHandler):
         return True, None
 
     @sanitize()
-    def put(self, req, relpath, folder=None, tr=None, data_types=None, **args):        
+    def put(self, req, relpath, folder=None, tr=None, data_type="", **args):        
         folder_name = folder
         if not folder_name:
             return 400, "Folder mush be specified"
-            
+        
         if tr is not None:
             tr = timelib.text2timestamp(tr)
         
-        if not data_types:
-            data_types = [""]
-        else:
-            data_types = data_types.split(",")
-
         if req.method != 'POST':
             return 400
 
@@ -396,20 +392,22 @@ class Handler(WPHandler):
             ok, resp = self.authenticate_digest(req, folder)
             if not ok:  return resp         # authentication failrure
 
-        input = req.body.split(b"\n")
-        header = input[0].decode("utf-8").strip()
+        data = req.body.decode("utf-8")
+
+        folder = self.App.db().openFolder(folder_name)
+        if folder is None:
+            return 404, "Folder not found"
+            
+        input = data.splitlines()
+        header = input[0].strip()
         columns = [x.strip() for x in header.split(',')]
         if len(columns) < 3 or \
                 columns[0].lower() != 'channel' or \
                 columns[1].lower() != 'tv':
             return 400, "Invalid header line in the CSV input."
-                
-        columns = columns[2:]
-        #print 'columns: ', columns
-        folder = self.App.db().openFolder(folder_name)
-        if folder is None:
-            return 404, "Folder not found"
             
+        columns = columns[2:]
+
         data = []
         for i in range(1, len(input)):
             line = input[i].strip()
@@ -419,14 +417,13 @@ class Handler(WPHandler):
             if len(tup) < 3 or not isinstance(tup[0], int) or not isinstance(tup[1], (int, float)):
                 return 400, f"Invalid data in line {i}"
             data.append(tup)
-            
+        
         if not data:
             return Response("OK", status=204)
 
         #print "len(data)=", len(data)
 
-        for t in data_types:
-            folder.addData(data, data_type=t, tr=tr, columns=columns)
+        folder.addData(data, data_type=data_type, tr=tr, columns=columns)
         return Response("OK")
         
     @sanitize()
@@ -445,11 +442,11 @@ class Handler(WPHandler):
             return 404, "Folder not found"
         
         if copy_from:
-            folder.copyTag(copy_from, tag, override = override == 'yes')
+            tr = folder.copyTag(copy_from, tag, override = override == 'yes')
         else:
             tr = text2timestamp(tr)
             folder.tag(tag, override = override == 'yes', tr=tr)
-        return Response("OK")
+        return str(tr)
 
     @sanitize()
     def tags(self, req, relpath, folder=None, format="csv"):

@@ -11,7 +11,7 @@ def cursor_iterator(c):
         tup = c.fetchone()
 
 class ConDB:
-    def __init__(self, connstr=None, connection=None):
+    def __init__(self, connection=None, connstr=None):
         """Initializes the connection to the ConDB
         
         Parameters
@@ -19,7 +19,8 @@ class ConDB:
         connection:
             Psycopg2 connection object
         connstr : str
-            Postgres connection string, e.g. "host=... port=... dbname=...". Ignored if connection is provided
+            Postgres connection string, e.g. "host=... port=... dbname=...". 
+            Ignored if ``connection`` is provided
         """
         self.Conn = connection
         self.ConnStr = connstr
@@ -132,7 +133,7 @@ class CDFolder:
         (
             __tv                      double precision,
             __tr                      double precision,   
-            __channel                 int,
+            __channel                 bigint,
             __data_type               text,
             %d
             ,
@@ -145,8 +146,8 @@ class CDFolder:
 
 
     DropTables = """
-        drop table %t_tag;
-        drop table %t_update;
+        drop table if exists %t_tag;
+        drop table if exists %t_update;
     """
 
     StructureColumns = ["__channel", "__tv", "__tr", "__data_type"]
@@ -285,7 +286,45 @@ class CDFolder:
                     c.execute("rollback")
                     return False
         return True
+    
+    @staticmethod
+    def createSQL(name, column_types, owner = None, grants = {}, drop_existing=False):
+
+        namespace = ""
+        if '.' in name:
+            namespace, name = name.split('.', 1)
+
+        sql = ""
+        if namespace:
+            sql += f"\nset search_path to {namespace};\n"
+        if drop_existing:
+            sql += CDFolder.DropTables
+        if owner is not None:
+            sql += f"\nset role {owner};\n"
         
+        columns = ",".join(["%s %s" % (n,t) for n,t in column_types])
+        sql += CDFolder.CreateTables
+        
+        if grants:
+            read_roles = ','.join(grants.get('r',[]))
+            if read_roles:
+                sql += f"""\ngrant select on 
+                        %t_tag,
+                        %t_update
+                        to {read_roles};
+                """
+            write_roles = ','.join(grants.get('w',[]))
+            if write_roles:
+                sql += f"""\ngrant insert, delete, update on 
+                        %t_tag,
+                        %t_update
+                        to {write_roles};
+                """
+
+        sql = sql.replace("%d", columns).replace("%t", name)
+        print("createSQL: sql:\n", sql)
+        return sql
+    
     def createTables(self, owner = None, grants = {}, drop_existing=False):
         from psycopg2.errors import UndefinedTable
         
@@ -299,29 +338,9 @@ class CDFolder:
             exists = False
         if not exists:
             c = self.DB.cursor()
-            if owner:
-                c.execute("set role %s" % (owner,))
-            columns = ",".join(["%s %s" % (n,t) for n,t in self.DataColumnsTypes])
-            sql = self.CreateTables.replace("%d", columns)
-            self.execute(sql)
-            read_roles = ','.join(grants.get('r',[]))
-            if read_roles:
-                grant_sql = """grant select on 
-                        %t_tag,
-                        %t_update
-                        to """ + read_roles         # + %t_snapshot_data,
-                #print grant_sql
-                self.execute(grant_sql)
-            write_roles = ','.join(grants.get('w',[]))
-            if write_roles:
-                grant_sql = """grant insert, delete, update on 
-                        %%t_tag,
-                        %%t_update
-                        to %(roles)s; 
-                    grant all on %%t_snapshot___id_seq to %(roles)s;""" % {'roles':write_roles}     # +%%t_snapshot_data,
-                #print grant_sql
-                self.execute(grant_sql)
-            c.execute("commit")
+            sql = CDFolder.createSQL(self.Name, self.DataColumnsTypes, drop_existing=drop_existing, owner=owner,
+                        grants=grants)
+            c.execute(sql)
 
     def tags(self):
         """Returns list of tags defined for the folder
@@ -408,17 +427,17 @@ class CDFolder:
     def merge_timelines(self, initial, timelines):
         return sorted(list(initial) + list(timelines), key = lambda row: tuple(row[:3]))       # sort by channel, tv, data_type
 
-    def getData(self, t1, t2=None, tag=None, tr=None, data_type=None, channel_range=None):
+    def getData(self, t0, t1=None, tag=None, tr=None, data_type=None, channel_range=None):
         """Retieves data for specified validity time or time interval from the folder
         
         Parameters
         ----------
-            t1 : float, int
+            t0 : float, int
                 The beginning of the time interval.
-            t2 : float, int or None
+            t1 : float, int or None
                 The end of the time interval. For each channel, the output will include the most recent data values preceding t1
                 and all the values between t1 and t2.
-                If t2 == t1 or t2 == None, the method returns data for the t = t1 = t2 point in time
+                If t0 == t1 or t1 == None, the method returns data for the t0 point in time
             tr : float, int
                 Retieve data retrospectively from a previous state of the database specified with tr as a timestamp.
                 The result will include only data added *before* the specified tr. By default, will include most recent data.
@@ -437,15 +456,15 @@ class CDFolder:
         """
 
         # initial data
-        initial = self._get_data_point(t1, tag=tag, tr=tr, data_type=data_type, channel_range=channel_range)
-        if t1 == t2 or t2 is None:
+        initial = self._get_data_point(t0, tag=tag, tr=tr, data_type=data_type, channel_range=channel_range)
+        if t0 == t1 or t1 is None:
             return initial
         
         all_columns = self.all_columns(prefix="u", as_text=True)
 
         params = {
+            "tv0":   t0,
             "tv1":   t1,
-            "tv2":   t2,
             "tag":  tag,
             "tr":   tr,
             "data_type": data_type,
@@ -456,8 +475,8 @@ class CDFolder:
         if tag is not None:
             c = self.execute(f"""
                 select distinct on (u.__channel, u.__tv) {all_columns} from %t_update u, %t_tag t
-                    where u.__tv > %(tv1)s
-                        and (%(tv2)s is null or u.__tv <= %(tv2)s)
+                    where u.__tv > %(tv0)s
+                        and (%(tv1)s is null or u.__tv <= %(tv1)s)
                         and u.__tr < t.__tr
                         and t.__name = %(tag)s
                         and (%(data_type)s is null or u.__data_type = %(data_type)s)
@@ -468,8 +487,8 @@ class CDFolder:
         else:
             c = self.execute(f"""
                 select distinct on (u.__channel, u.__tv) {all_columns} from %t_update u
-                    where u.__tv > %(tv1)s
-                        and (%(tv2)s is null or u.__tv <= %(tv2)s)
+                    where u.__tv > %(tv0)s
+                        and (%(tv1)s is null or u.__tv <= %(tv1)s)
                         and (%(tr)s is null or u.__tr < %(tr)s)
                         and (%(data_type)s is null or u.__data_type = %(data_type)s)
                         and (%(min_channel)s is null or u.__channel >= %(min_channel)s)
@@ -537,8 +556,7 @@ class CDFolder:
                 on conflict(__name)
                 do update
                     set __tr = %s, __comment = %s
-                        where __name = %s
-            """, (tr, tag, comment, tr, comment, tag))
+            """, (tr, tag, comment, tr, comment))
         else:
             c = self.execute("""
                 insert into %t_tag(__tr, __name, __comment)
@@ -566,3 +584,4 @@ class CDFolder:
         if tup: tr = tup[0]
         if tr is not None:
             self.tag(new_tag, comment=comment, override=override, tr=tr)
+        return tr
