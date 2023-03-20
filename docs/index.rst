@@ -11,6 +11,7 @@ ConDB Client Documentation
    :caption: Contents:
 
    client_installation
+   ui
    web_api
    rest
    db_api

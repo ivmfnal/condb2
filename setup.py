@@ -22,8 +22,13 @@ setup(
     description = ("Conditions Database (ConDB)"),
     license = "BSD 3-clause",
     keywords = "database, web service, conditions database",
-    packages=['condb'],
+    packages=['condb', 'condb.ui', 'condb.ui.cli'],
     zip_safe = False,
     install_requires=["psycopg2"],
-    classifiers=[]
+    classifiers=[],
+    entry_points = {
+            "console_scripts": [
+                "condb = condb.ui.condb_ui:main",
+            ]
+        }
 )
