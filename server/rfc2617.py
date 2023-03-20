@@ -1,7 +1,15 @@
 import re, hashlib, requests, base64, time
 from requests.auth import HTTPDigestAuth
 
-from ucondb.tools import to_str, to_bytes
+def to_str(x):
+    if isinstance(x, bytes):
+        x = x.decode("utf-8")
+    return x
+
+def to_bytes(x):
+    if isinstance(x, str):
+        x = x.encode("utf-8")
+    return x
 
 def digest_client(url, username, password):
     response = requests.get(url, auth=HTTPDigestAuth(username, password))
