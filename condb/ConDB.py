@@ -322,7 +322,7 @@ class CDFolder:
                 """
 
         sql = sql.replace("%d", columns).replace("%t", name)
-        print("createSQL: sql:\n", sql)
+        #print("createSQL: sql:\n", sql)
         return sql
     
     def createTables(self, owner = None, grants = {}, drop_existing=False):

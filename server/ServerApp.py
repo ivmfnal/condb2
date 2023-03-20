@@ -209,13 +209,18 @@ class Handler(WPHandler):
     def get(self, req, relpath, folder=None, t=None, t0=None, t1=None, include_tr="no", include_data_type=None,
                 tr=None, format="csv", data_type=None, **args):
         #print "get(%s,%s,%s)" % (folder, t0, t1)
-        
-        if t0 is not None:  t0 = float(t0)
-        if t1 is not None:  t1 = float(t1)
 
-        if t is not None:  
-            t0 = t1 = float(t)
-            
+        if t0 is not None:
+            t0 = float(t0)
+            if t1 is None:
+                t1 = time.time()
+            else:
+                t1 = float(t1)
+        else:
+            if t is None:   t = time.time()
+            else: t = float(t)
+            t0 = t1 = t
+
         if tr is not None:
             tr = text2timestamp(tr)
 
