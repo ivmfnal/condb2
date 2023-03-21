@@ -6,7 +6,7 @@ from condb import ConDBClient
 #
 
 Usage = """
-python populate.py <server url> <username> <password> <folder>
+python remote.py <server url> <username> <password> <folder>
 """
 
 server_url, username, password, folder = sys.argv[1:]

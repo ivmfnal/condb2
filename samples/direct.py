@@ -6,7 +6,7 @@ from condb import ConDB
 #
 
 Usage = """
-python populate.py host=<dbhost> port=<dbport> dbname=... user=... password=...
+python direct.py host=<dbhost> port=<dbport> dbname=... user=... password=...
 """
 
 #
