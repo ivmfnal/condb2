@@ -2,7 +2,7 @@ import sys, random, time
 from condb import ConDBClient
 
 #
-# Sample code demonstrating direct access to a ConDB folder
+# Sample code demonstrating remote access to a ConDB folder via the ConDB web server
 #
 
 Usage = """
