@@ -64,6 +64,8 @@ class ConDBClient(HTTPClient):
         if tr is not None:
             tr = epoch(tr)
             url += f"&tr={tr}"
+        if tag is not None:
+            url += f"&tag={tag}"
         if data_type:
             url += f"&data_type={data_type}"
         if channels is not None:
@@ -109,7 +111,8 @@ class ConDBClient(HTTPClient):
             folder : str
                 Folder name
             data : list
-                List of tuples: [(channel, tv, ...), ...]. Order of columns after tv is the same as in ``data_columns``
+                List of tuples: [channel, tv, ...]. 
+                Order of columns after tv is the same as in ``columns``
             columns : list
                 Must begin with ["channel", "tv"]
             data_type : str

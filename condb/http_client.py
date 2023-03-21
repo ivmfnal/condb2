@@ -186,7 +186,7 @@ class HTTPClient(object):
                 yield obj
                     
     def interpret_response(self, response, none_if_not_found=True):
-        if response.status_code != 200:
+        if response.status_code // 100 != 2:
             if none_if_not_found and response.status_code == 404:
                 return None
             elif response.status_code == 404:

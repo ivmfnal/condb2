@@ -207,7 +207,7 @@ class Handler(WPHandler):
 
     @sanitize()
     def get(self, req, relpath, folder=None, t=None, t0=None, t1=None, include_tr="no", include_data_type=None,
-                tr=None, format="csv", data_type=None, **args):
+                tr=None, tag=None, format="csv", data_type=None, **args):
         #print "get(%s,%s,%s)" % (folder, t0, t1)
 
         if t0 is not None:
@@ -232,7 +232,7 @@ class Handler(WPHandler):
         if folder is None:
             return Response("Table %s does not exist" % (folder_name,), status=404)
 
-        lines = self.getData(folder, t0, t1, tr=tr, data_type=data_type, **args)
+        lines = self.getData(folder, t0, t1, tr=tr, tag=tag, data_type=data_type, **args)
 
         if lines == None:
             lines = []
@@ -450,6 +450,7 @@ class Handler(WPHandler):
             tr = folder.copyTag(copy_from, tag, override = override == 'yes')
         else:
             tr = text2timestamp(tr)
+            #print("override:", override == 'yes')
             folder.tag(tag, override = override == 'yes', tr=tr)
         return str(tr)
 

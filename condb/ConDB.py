@@ -515,6 +515,11 @@ class CDFolder:
             columns : list of strings
                 Optional, names of data columns present in the input data, without channel amd tv. If not specified,
                 the data is assumed to contain all the data columns
+        
+        Returns
+        -------
+        float
+            Tr timestamp
         """
         # data: [(channel, tv, data, ...),...]
         csv_rows = []
@@ -533,6 +538,7 @@ class CDFolder:
                     raise ValueError("Unrecognized data column name")
             columns = self.StructureColumns + columns
         self.copy_from(csv, "%t_update", columns)
+        return tr
 
     def tag(self, tag, comment="", override=False, tr=None):
         """Creates new tag with the specified Tr
