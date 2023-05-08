@@ -22,6 +22,9 @@ class ConDB:
             Postgres connection string, e.g. "host=... port=... dbname=...". 
             Ignored if ``connection`` is provided
         """
+        if isinstance(connection, str):
+            connstr = connection
+            connection = None
         self.Conn = connection
         self.ConnStr = connstr
         
@@ -188,7 +191,9 @@ class CDFolder:
 
     @staticmethod
     def open(db, full_name):
-        dig = DbDig(db.connect())
+        dbcon = db.connect()
+        dig = DbDig(dbcon)
+        #print("dbcon:", dbcon)
         name = full_name
         ns = 'public'
         words = full_name.split('.')
