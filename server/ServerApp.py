@@ -210,6 +210,11 @@ class Handler(WPHandler):
                 tr=None, tag=None, format="csv", data_type=None, **args):
         #print "get(%s,%s,%s)" % (folder, t0, t1)
 
+        if folder is None:
+            return 400, "Folder must be specified"
+        if len(folder.split('.')) not in (1, 2):
+            return 400, "Invalid folder name"
+
         if t0 is not None:
             t0 = float(t0)
             if t1 is None:
