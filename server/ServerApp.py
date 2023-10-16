@@ -87,6 +87,16 @@ class ServerApp(WPApp):
         #print("App.db(): connection:", id(conn), conn)
         return ConDB(connection = conn)
 
+def cache_control(*control, max_age=None):
+    parts = []
+    if control:
+        parts = [control[0]]
+    if max_age is not None:
+        parts.append(f"max-age={max_age}")
+    if not parts:
+        return {}
+    else:
+        return {"Cache-Control": " ".join(parts)}
 
 class Handler(WPHandler):
     def __init__(self, req, app):
@@ -99,16 +109,16 @@ class Handler(WPHandler):
             c.execute("select 1")
             tup = c.fetchone()
             if tup[0] == 1:
-                return Response("OK")
+                return Response("OK", headers=cache_control("no-store"))
             else:
                 raise ValueError("Data mismatch. Expected (1,), got %s" % (tup,))
         except:
-            return "Probe error: %s" % (traceback.format_exc(),), 500
+            return 500, "Probe error: %s" % (traceback.format_exc(),), cache_control("no-store")
 
     def version(self, req, relpath, **args):
         return '{ "GUI":"%s", "API":"%s", "Version":"%s_%s" }\n' % \
                     (GUI_Version, API_Version, GUI_Version, API_Version) \
-                ,"text/json"
+                ,"text/json", cache_control(max_age=3600)
     
     def dataTupleToCSV(self, tup):
         text_values = []
