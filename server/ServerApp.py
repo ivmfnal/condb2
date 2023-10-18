@@ -9,7 +9,7 @@ import threading, re
 from rfc2617 import digest_server
 from urllib.parse import unquote
 
-REST_Version = "1.0.3"
+REST_Version = "2.0.0"
 API_Version = condb_version
 
 def dtfmt(x, fmt):

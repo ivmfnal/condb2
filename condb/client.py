@@ -5,7 +5,10 @@ from urllib.parse import quote, unquote
 from requests.auth import HTTPDigestAuth
 from collections import namedtuple
 
+
 class ConDBClient(HTTPClient):
+
+    Version = "2.0.0"
     
     def __init__(self, url, username=None, password=None):
         """Initializes the ConDB client
@@ -30,6 +33,7 @@ class ConDBClient(HTTPClient):
 
     def version(self):
         out = self.get("version")
+        out["Client"] = self.Version
         return out
 
     def get_data(self, folder, t0, t1=None, tag=None, tr=None, data_type=None, 
