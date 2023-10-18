@@ -13,7 +13,6 @@ ConDB Client Documentation
    client_installation
    ui
    web_api
-   rest
    db_api
 
 Indices and tables
