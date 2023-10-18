@@ -7,6 +7,10 @@ from condb.timelib import text2timestamp, epoch
 from threading import RLock, Lock, Condition
 import threading, re
 from rfc2617 import digest_server
+from urllib.parse import unquote
+
+REST_Version = "1.0.3"
+API_Version = condb_version
 
 def dtfmt(x, fmt):
     return x.strftime(fmt) if x else ''
@@ -74,8 +78,8 @@ class ServerApp(WPApp):
             },
             globals = 
             {    "GLOBAL_Title":         self.Title,
-                 "GLOBAL_GUI_Version":   None, 
-                 "GLOBAL_API_Version":   condb_version  
+                 "GLOBAL_REST_Version":  REST_Version, 
+                 "GLOBAL_API_Version":   API_Version  
             }
         )
         
@@ -116,8 +120,8 @@ class Handler(WPHandler):
             return 500, "Probe error: %s" % (traceback.format_exc(),), cache_control("no-store")
 
     def version(self, req, relpath, **args):
-        return '{ "GUI":"%s", "API":"%s", "Version":"%s_%s" }\n' % \
-                    (GUI_Version, API_Version, GUI_Version, API_Version) \
+        return '{ "REST":"%s", "API":"%s" }\n' % \
+                    (REST_Version, API_Version) \
                 ,"text/json", cache_control(max_age=3600)
     
     def dataTupleToCSV(self, tup):
@@ -134,32 +138,26 @@ class Handler(WPHandler):
             text_values.append(v)
         return ','.join(text_values)
         
-    def csv_iterator_from_iter(self, data, data_columns, include_tr=False, include_data_type=False):
-        headline = "channel,tv,"
-        if include_tr:  headline += "tr,"
-        if include_data_type:  headline += "data_type,"
+    def csv_iterator_from_iter(self, data, data_columns):
+        headline = "channel,tv,tr,data_type,"
         
         yield headline+','.join(data_columns)+'\n'
         for tup in data:
-            if not include_data_type:   tup = tup[:3] + tup[4:]
-            if not include_tr:          tup = tup[:2] + tup[3:]
             vtxt = self.dataTupleToCSV(tup)
             yield vtxt + "\n"
             
-    def json_iterator_from_iter(self, data, data_columns, include_tr=False, include_data_type=False):
-        columns = ["channel", "tv"]
-        if include_data_type:   columns.append("data_type")
-        if include_tr:          columns.append("tr")
+    def json_iterator_from_iter(self, data, data_columns):
+        columns = ["channel", "tv", "data_type", "tr"]
         yield '{\n  "columns":%s,\n  "rows":[' % (json.dumps(columns))
         first_line = True
         for tup in data:
             out = '\n    ' if first_line else ',\n    ' 
             row = {
                 "channel": tup[0],
-                "tv": tup[1]
+                "tv": tup[1],
+                "tr": tup[2],
+                "data_type": tup[3]
             }
-            if include_tr:  row["tr"] = tup[2]
-            if include_data_type:  row["data_type"] = tup[3]
             for column_name, value in zip(data_columns, tup[4:]):
                 row[column_name] = value
             out += json.dumps(row)
@@ -181,9 +179,9 @@ class Handler(WPHandler):
         if buf:
             yield ''.join(buf)
 
-    def data_output_generator(self, data, data_columns, include_tr=False, include_data_type=False, format="csv"):
-        formatted = self.csv_iterator_from_iter(data, data_columns, include_tr=include_tr, include_data_type=include_data_type) if format == "csv" \
-                else self.json_iterator_from_iter(data, data_columns, include_tr=include_tr, include_data_type=include_data_type)
+    def data_output_generator(self, data, data_columns, format="csv"):
+        formatted = self.csv_iterator_from_iter(data, data_columns) if format == "csv" \
+                else self.json_iterator_from_iter(data, data_columns)
         return self.mergeLines(formatted)
 
     def sortTuples(self, data, sort_spec):
@@ -216,7 +214,7 @@ class Handler(WPHandler):
                         yield tup
 
     @sanitize()
-    def get(self, req, relpath, folder=None, t=None, t0=None, t1=None, include_tr="no", include_data_type=None,
+    def get(self, req, relpath, folder=None, t=None, t0=None, t1=None,
                 tr=None, tag=None, format="csv", data_type=None, **args):
         #print "get(%s,%s,%s)" % (folder, t0, t1)
 
@@ -239,15 +237,12 @@ class Handler(WPHandler):
         if tr is not None:
             tr = text2timestamp(tr)
 
-        include_tr = include_tr == "yes"
-        include_data_type = include_data_type == "yes" or (data_type is None and include_data_type != "no")
-        
         folder_name = folder
         folder = self.App.db().openFolder(folder)
         if folder is None:
             return Response("Table %s does not exist" % (folder_name,), status=404)
 
-        lines = self.getData(folder, t0, t1, tr=tr, tag=tag, data_type=data_type, **args)
+        lines = self.getData(folder, t0=t0, t1=t1, tr=tr, tag=tag, data_type=data_type, **args)
 
         if lines == None:
             lines = []
@@ -257,8 +252,7 @@ class Handler(WPHandler):
         #for l in lines:
         #    print(l)
 
-        lines = self.data_output_generator(lines, folder.DataColumns, include_tr=include_tr, include_data_type=include_data_type,
-                    format=format)
+        lines = self.data_output_generator(lines, folder.DataColumns, format=format)
         resp = Response(app_iter = lines, content_type=f'text/{format}')
         cache_ttl = self.App.CacheTTL
         if "tag" in args:
@@ -267,10 +261,80 @@ class Handler(WPHandler):
         resp.cache_expires(cache_ttl)
         return resp
 
-    def getData(self, folder, t0, t1, 
+    @sanitize(exclude="cond")
+    def search(self, req, relpath, folder=None, t=None,
+                tr=None, tag=None, format="csv", data_type=None, 
+                cond=None, channels=None, **args):
+        #print "get(%s,%s,%s)" % (folder, t0, t1)
+
+        if folder is None:
+            return 400, "Folder must be specified"
+        if len(folder.split('.')) not in (1, 2):
+            return 400, "Invalid folder name"
+
+        if tr is not None:
+            tr = text2timestamp(tr)
+
+        folder_name = folder
+        folder = self.App.db().openFolder(folder)
+        if folder is None:
+            return 404, "Table %s does not exist" % (folder_name,)
+
+        conditions_in = []
+        if cond:
+            if isinstance(cond, list):
+                conditions_in = cond
+            else:
+                conditions_in = [cond]
+        conditions = []
+        for cond in conditions_in:
+            cond = unquote(cond)
+            #print("unquoted cond:", cond)
+            # after unquoting, cond is a string like "<name> <op> <value>"
+            parts = cond.split(None, 2)
+            if len(parts) != 3:
+                return 400, f"Invalid condition specification: {cond}"
+            name, op, value = parts
+            if op not in ("<", "<=", "=", "!=", ">=", ">"):
+                return 400, f"Unrecognized operator: {op}"
+            if value and value[0] in ("'", '"'):
+                value = value[1:-1]
+            else:
+                try:    value = int(value)
+                except:
+                    try:    value = float(value)
+                    except:
+                        if value == 'null': value = None
+                        else:
+                            return 400, f"Can not parse value: {value}"
+            #print("parsed cond:", name, op, value)
+            conditions.append((name, op, value))
+
+        #print("server: search")
+        lines = self.getData(folder, tr=tr, tag=tag, data_type=data_type,
+                    conditions=conditions, mode="search", channels=channels)
+
+        if lines == None:
+            lines = []
+
+        #lines = list(lines)
+        #print("get: lines:")
+        #for l in lines:
+        #    print(l)
+
+        lines = self.data_output_generator(lines, folder.DataColumns, format=format)
+        resp = Response(app_iter = lines, content_type=f'text/{format}')
+        cache_ttl = self.App.CacheTTL
+        if "tag" in args:
+            cache_ttl = self.App.TaggedCacheTTL
+        cache_ttl = int(random.uniform(cache_ttl * 0.9, cache_ttl * 1.2)+0.5)
+        resp.cache_expires(cache_ttl)
+        return resp
+
+    def getData(self, folder, t0=None, t1=None, 
                     tr = None,
-                    channels=None,
-                    tag = None, data_type=None):
+                    channels=None, conditions=[],
+                    tag = None, data_type=None, mode="interpolate"):
         
         #print "getData(%s,%s,%s,%s,%s)" % (folder, t, t0, t1, args)
         
@@ -302,7 +366,14 @@ class Handler(WPHandler):
         channel_ranges = channel_ranges or None
         global_range = (cmin, cmax) if (cmin or cmax) else None
 
-        rows = folder.getData(t0, t1, data_type=data_type, tag = tag, tr=tr, channel_range = global_range)
+        if mode == "interpolate":
+            rows = folder.getData(t0, t1, data_type=data_type, tag = tag, tr=tr, 
+                channel_range = global_range)
+        else:
+            rows = folder.searchData(conditions=conditions, data_type=data_type, 
+                tag = tag, tr=tr, 
+                channel_range = global_range)
+            print("getData: rows:", rows)
 
         if channel_ranges:
             rows = self.filter_channels(rows, channel_ranges)
@@ -513,14 +584,15 @@ if "CON_DB_CFG" in os.environ:
 
 if __name__ == "__main__":
     import sys, getopt
-    opts, args = getopt.getopt(sys.argv[1:], "c:")
+    opts, args = getopt.getopt(sys.argv[1:], "c:p:")
     opts = dict(opts)
     config = opts.get("-c")
     if config:
         print("Using config file:", config)
-    print("Starting HTTP server at port 8888...") 
+    port = int(opts.get("-p", 8888))
+    print(f"Starting HTTP server at port {port}...") 
     application = create_application(config)
-    application.run_server(8888)
+    application.run_server(port)
 
 
 

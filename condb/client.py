@@ -3,6 +3,7 @@ from condb.timelib import epoch
 import csv, io
 from urllib.parse import quote, unquote
 from requests.auth import HTTPDigestAuth
+from collections import namedtuple
 
 class ConDBClient(HTTPClient):
     
@@ -23,7 +24,16 @@ class ConDBClient(HTTPClient):
         self.Username = username
         self.Password = password
         
-    def get_data(self, folder, t0, t1=None, tag=None, tr=None, data_type=None, include_data_type=False, channels=None):
+    def probe(self):
+        out = self.get("probe")
+        return out
+
+    def version(self):
+        out = self.get("version")
+        return out
+
+    def get_data(self, folder, t0, t1=None, tag=None, tr=None, data_type=None, 
+                channels=None, as_named_tuples=False):
         """Get data from folder
 
         Parameters
@@ -40,19 +50,18 @@ class ConDBClient(HTTPClient):
                 Optional, return data for previous state of the database identified with tr
             data_type : str
                 Optional, return sata for the given data source. Default: ""
-            include_data_type : boolean
-                Optional, whether to include data_type column. Default: False
             channels : list or tuple or int
                 If int, return data for single channel      
                 If tuple, return data for a range of channels, e.g.: (100, 151)
                 If list, return data for list of channels or channel ranges, e.g.: [10, 15, (23, 27)]
+            as_named_tuples : bool
+                If true, return the data as named tuples. Otherwise, tuples
         
         Returns
         -------
-        tuple
-            (columns, iterable)
+        tuple (columns, generator)
                 columns - list of column names
-                iterable - iterable with tuples with values corresponding the column names
+                generator - producing tuples or collections.namedtuple's, one per data row
         """
         
         
@@ -82,25 +91,125 @@ class ConDBClient(HTTPClient):
                     ranges.append(str(spec))
             if ranges:
                 url += f"&channels=" + ",".join(ranges)
-        if include_data_type:
-            url += "&include_data_type=yes"
 
         data = self.get_text(url)
         csv_buf = io.StringIO(data)
         reader = csv.reader(csv_buf, delimiter = ",", quoting = csv.QUOTE_MINIMAL, lineterminator="\n")
-        columns = next(reader)
-        out = []
-        for row in reader:
-            out_row = []
-            for x in row:
-                try:    x = int(x)
-                except:
-                    try:    x = float(x)
+        columns = tuple(next(reader))
+
+        def row_generator(reader, columns, as_named_tuples):
+            tuple_type = namedtuple(folder, columns)
+            for row in reader:
+                out_row = []
+                for x in row:
+                    try:    x = int(x)
                     except:
-                        pass
-                out_row.append(x)
-            out.append(tuple(out_row))
-        return columns, out
+                        try:    x = float(x)
+                        except:
+                            pass
+                    out_row.append(x)
+                tup = tuple(out_row) if not as_named_tuples else tuple_type._make(out_row)
+                yield tup
+        return columns, row_generator(reader, columns, as_named_tuples)
+
+    def search_data(self, folder, tag=None, tr=None, data_type=None, channels=None,
+                    conditions=[], as_named_tuples=False):
+        """Search the timeline determined by (tag, tr, data_type) for data rows
+           matching the conditions expressed in terms of the data column values
+
+        Parameters
+        ----------
+            folder : str
+                Folder name
+            tag : str
+                Optional, return data from the tagged database state
+            tr : datetime or int or float 
+                Optional, return data for previous state of the database identified with tr
+            data_type : str
+                Optional, return sata for the given data source. Default: ""
+            channels : list or tuple or int
+                If int, return data for single channel      
+                If tuple, return data for a range of channels, e.g.: (100, 151)
+                If list, return data for list of channels or channel ranges, e.g.: [10, 15, (23, 27)]
+            conditions : list of tuples
+                Conditions cpecified as tuples: ("column_name", op, value)
+                column_name is a name of a data column
+                op is a string "<", "<=", "=", "!=", ">=", ">"
+                value is a string, boolean, numeric or None
+            as_named_tuples : bool
+                If true, return the data as named tuples. Otherwise, tuples
+
+        Returns
+        -------
+        tuple (columns, generator)
+                columns - list of column names
+                generator - producing tuples or collections.namedtuple's, one per data row
+        """
+
+        url = f"search?folder={folder}"
+        if tr is not None:
+            tr = epoch(tr)
+            url += f"&tr={tr}"
+        if tag is not None:
+            url += f"&tag={tag}"
+        if data_type:
+            url += f"&data_type={data_type}"
+        if channels is not None:
+            if isinstance(channels, (int, tuple)):
+                channels = [channels]
+            ranges = []
+            for spec in channels:
+                if isinstance(spec, tuple):
+                    c0, c1 = spec
+                    if c0 is None:  c0 = ''
+                    if c1 is None:  c1 = ''
+                    ranges.append(f"{c0}-{c1}")
+                else:
+                    ranges.append(str(spec))
+            if ranges:
+                url += f"&channels=" + ",".join(ranges)
+
+        if conditions:
+            # encode conditions
+            parts = []
+            for column, op, value in conditions:
+                if op not in ("<", "<=", "=", "!=", ">=", ">"):
+                    raise ValueError(f"Unrecognized comparison operator: {op}")
+                if not isinstance(value, (int, float, str, bool)) and valie is not None:
+                    raise ValueError(f"Unsupported value type: %s" % (repr(value),))
+                if value is None:
+                    if op not in ("=", "!="):
+                        raise ValueError(f"Unsupported operation {op} for comparison with NULL")
+                    parts.append("cond=" + quote(f"{column} {op} null"))
+                else:
+                    if isinstance(value, str):
+                        if "'" in value:
+                            raise ValueError(f"Unsafe string value {value}")
+                        parts.append("cond=" + quote(f"{column} {op} '{value}'"))
+                    else:
+                        parts.append("cond=" + quote(f"{column} {op} {value}"))
+            url += "&" + "&".join(parts)
+            #print("url:", url)
+
+        data = self.get_text(url)
+        #print("data:", data)
+        csv_buf = io.StringIO(data)
+        reader = csv.reader(csv_buf, delimiter = ",", quoting = csv.QUOTE_MINIMAL, lineterminator="\n")
+        columns = next(reader)
+        def row_generator(reader, columns, as_named_tuples):
+            tuple_type = namedtuple(folder, columns)
+            for row in reader:
+                out_row = []
+                for x in row:
+                    try:    x = int(x)
+                    except:
+                        try:    x = float(x)
+                        except:
+                            pass
+                    out_row.append(x)
+                tup = tuple(out_row) if not as_named_tuples else tuple_type._make(out_row)
+                yield tup
+        return columns, row_generator(reader, columns, as_named_tuples)
 
     def put_data(self, folder, data, columns, tr=None, data_type=None):
         """Add data to folder.

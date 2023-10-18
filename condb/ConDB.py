@@ -2,6 +2,8 @@ import sys, time, datetime
 import io
 from .dbdig import DbDig
 
+API_Version = "1.0.3"
+
 #from dbdig import DbDig
 
 def cursor_iterator(c):
@@ -11,6 +13,9 @@ def cursor_iterator(c):
         tup = c.fetchone()
 
 class ConDB:
+
+    Version = API_Version
+
     def __init__(self, connection=None, connstr=None):
         """Initializes the connection to the ConDB
         
@@ -503,6 +508,92 @@ class CDFolder:
         timelines = cursor_iterator(c)
         return self.shadow_data(self.merge_timelines(initial, timelines))
 
+    def searchData(self, tag=None, tr=None, data_type=None, channel_range=None,
+            conditions=[]):
+        """Find all data records on the timeline determined by (tag, tr, data_type)
+            and satisfying specified conditions expressed in terms of data column values
+        
+        Parameters
+        ----------
+            conditions : list 
+                Conditions cpecified as tuples:
+                    ("column_name", op, value)
+                column_name is a name of a data column
+                op is a string "<", "<=", "=", "!=", ">=", ">"
+                value is a string, boolean, numeric or None
+            tr : float, int
+                Retieve data retrospectively from a previous state of the database recorded at tr or earlier.
+                By default, will include most recent data.
+            tag : str
+                Text tag previously assigned to a Tr value.
+            data_type : str
+                Data type to include. If None, will include data for all data types
+            channel_range : tuple
+                Tuple (min_channel, max_channel) if provided, only the channels within the specified interval, inclusively
+                will be included in the output. Each one of the limits can be None, which means there is no limit.
+        
+        Returns
+        -------
+        generator
+            Generator of tuples: (channel, tv, tr, data_type, <data column values>...)
+        """
+
+        # sanitize data column names and values from the conditions
+        for column, op, value in conditions:
+            if op not in ("<", "<=", "=", "!=", ">=", ">"):
+                raise ValueError(f"Unrecognized operator: {op}")
+            if column not in self.DataColumns:
+                raise ValueError(f"Unrecognized data column: {column}")
+            if isinstance(value, str) and "'" in value:
+                raise ValueError(f"Usafe string value: {value}")
+            if value is None and op not in ("=", "!="):
+                raise ValueError(f"Unsupported operation {op} for comparison with NULL")
+
+        all_columns = self.all_columns(prefix="u", as_text=True)
+
+        params = {
+            "tr":   tr,
+            "data_type": data_type,
+            "min_channel": channel_range[0] if channel_range else None,
+            "max_channel": channel_range[1] if channel_range else None
+        }
+
+        if tag is not None:
+            c = self.execute("select __tr from %t_tag t where t.__name=%s", (tag,))
+            tr = c.fetchone()[0]
+
+        # build SQL for data columns comparison
+        parts = []
+        conditions_sql = ""
+        for column, op, value in conditions:
+            if value is None:
+                if op == '=':
+                    part = f"timeline.{column} is null"
+                else:
+                    part = f"timeline.{column} is not null"
+            else:
+                part = f"timeline.{column} {op} '{value}'"
+            parts.append(part)
+
+        if parts:
+            conditions_sql = "where " + " and ".join(parts)
+
+        c = self.execute(f"""
+            select * from
+            (
+                select distinct on (u.__channel, u.__tv) {all_columns} 
+                    from %t_update u
+                    where 
+                        (%(tr)s is null or u.__tr < %(tr)s)
+                        and (%(data_type)s is null or u.__data_type = %(data_type)s)
+                        and (%(min_channel)s is null or u.__channel >= %(min_channel)s)
+                        and (%(max_channel)s is null or u.__channel <= %(max_channel)s)
+                    order by u.__channel, u.__tv, u.__tr desc
+            ) as timeline
+            {conditions_sql}
+        """, params)
+        return self.shadow_data(cursor_iterator(c))
+
     def addData(self, data, data_type="", tr=None, columns=None):
         """Adds data to the folder
         
@@ -574,7 +665,7 @@ class CDFolder:
                     values(%s, %s, %s)
             """, (tr, tag, comment))
         c.execute("commit")
-
+        
     def copyTag(self, tag, new_tag, comment="", override=False):
         """Creates new tag with the same Tr as an existing tag
         
