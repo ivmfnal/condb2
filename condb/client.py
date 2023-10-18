@@ -55,7 +55,7 @@ class ConDBClient(HTTPClient):
                 If tuple, return data for a range of channels, e.g.: (100, 151)
                 If list, return data for list of channels or channel ranges, e.g.: [10, 15, (23, 27)]
             as_named_tuples : bool
-                If true, return the data as named tuples. Otherwise, tuples
+                If true, return the data as collections.namedtuple's. Otherwise, native Python tuples
         
         Returns
         -------
@@ -137,7 +137,8 @@ class ConDBClient(HTTPClient):
                 op is a string "<", "<=", "=", "!=", ">=", ">"
                 value is a string, boolean, numeric or None
             as_named_tuples : bool
-                If true, return the data as named tuples. Otherwise, tuples
+                If true, return the data as collections.namedtuple's. 
+                Otherwise, native Python tuples
 
         Returns
         -------
