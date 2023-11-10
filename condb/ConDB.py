@@ -560,7 +560,7 @@ class CDFolder:
 
         if tag is not None:
             c = self.execute("select __tr from %t_tag t where t.__name=%s", (tag,))
-            tr = c.fetchone()[0]
+            params['tr'] = c.fetchone()[0]
 
         # build SQL for data columns comparison
         parts = []
