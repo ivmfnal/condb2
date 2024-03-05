@@ -102,7 +102,7 @@ class ConDBClient(HTTPClient):
         columns = tuple(next(reader))
 
         def row_generator(reader, columns, as_named_tuples):
-            folder1 = folder.split('.')[0]
+            folder1 = folder.split('.')[-1]
             tuple_type = namedtuple(folder1, columns)
             for row in reader:
                 out_row = []
@@ -203,7 +203,7 @@ class ConDBClient(HTTPClient):
         reader = csv.reader(csv_buf, delimiter = ",", quoting = csv.QUOTE_MINIMAL, lineterminator="\n")
         columns = next(reader)
         def row_generator(reader, columns, as_named_tuples):
-            folder1 = folder.split('.')[0]
+            folder1 = folder.split('.')[-1]
             tuple_type = namedtuple(folder1, columns)
             for row in reader:
                 out_row = []
